@@ -233,6 +233,12 @@ class DebugGroup(ArgumentGroup):
             action="store_true",
             help="Flag specifying the generated invite should be public."
         )
+        parser.add_argument(
+            "--test-suite-endpoint",
+            type=str,
+            metavar="<endpoint>",
+            help="URL endpoint for sending messages to the test suite agent."
+        )
 
         parser.add_argument(
             "--auto-accept-invites",
@@ -318,6 +324,8 @@ class DebugGroup(ArgumentGroup):
             settings["debug.invite_multi_use"] = True
         if args.invite_public:
             settings["debug.invite_public"] = True
+        if args.test_suite_endpoint:
+            settings["debug.test_suite_endpoint"] = args.test_suite_endpoint
 
         if args.auto_respond_credential_proposal:
             settings["debug.auto_respond_credential_proposal"] = True
@@ -473,6 +481,8 @@ class LoggingGroup(ArgumentGroup):
 @group(CAT_START)
 class ProtocolGroup(ArgumentGroup):
     """Protocol settings."""
+
+    GROUP_NAME = "Protocol"
 
     def add_arguments(self, parser: ArgumentParser):
         """Add protocol-specific command line arguments to the parser."""

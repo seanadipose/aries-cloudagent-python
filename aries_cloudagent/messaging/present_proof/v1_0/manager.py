@@ -14,6 +14,7 @@ from .models.presentation_exchange import V10PresentationExchange
 from .messages.presentation_proposal import PresentationProposal
 from .messages.presentation_request import PresentationRequest
 from .messages.presentation import Presentation
+from .message_types import ATTACH_DECO_IDS, PRESENTATION, PRESENTATION_REQUEST
 
 
 class PresentationManagerError(BaseError):
@@ -69,13 +70,13 @@ class PresentationManager:
             connection_id=connection_id,
             thread_id=presentation_proposal_message._thread_id,
             initiator=V10PresentationExchange.INITIATOR_SELF,
+            role=V10PresentationExchange.ROLE_PROVER,
             state=V10PresentationExchange.STATE_PROPOSAL_SENT,
             presentation_proposal_dict=presentation_proposal_message.serialize(),
             auto_present=auto_present,
         )
         await presentation_exchange_record.save(
-            self.context,
-            reason="create presentation proposal"
+            self.context, reason="create presentation proposal"
         )
 
         return presentation_exchange_record
@@ -93,6 +94,7 @@ class PresentationManager:
             connection_id=self.context.connection_record.connection_id,
             thread_id=presentation_proposal_message._thread_id,
             initiator=V10PresentationExchange.INITIATOR_EXTERNAL,
+            role=V10PresentationExchange.ROLE_VERIFIER,
             state=V10PresentationExchange.STATE_PROPOSAL_RECEIVED,
             presentation_proposal_dict=presentation_proposal_message.serialize(),
         )
@@ -125,20 +127,21 @@ class PresentationManager:
             A tuple (updated presentation exchange record, presentation request message)
 
         """
-        indy_proof_request = (
-            await (
-                PresentationProposal.deserialize(
-                    presentation_exchange_record.presentation_proposal_dict
-                )
-            ).presentation_proposal.indy_proof_request(
-                name=name, version=version, nonce=nonce
+        indy_proof_request = await (
+            PresentationProposal.deserialize(
+                presentation_exchange_record.presentation_proposal_dict
             )
+        ).presentation_proposal.indy_proof_request(
+            name=name, version=version, nonce=nonce
         )
 
         presentation_request_message = PresentationRequest(
             comment=comment,
             request_presentations_attach=[
-                AttachDecorator.from_indy_dict(indy_proof_request)
+                AttachDecorator.from_indy_dict(
+                    indy_dict=indy_proof_request,
+                    ident=ATTACH_DECO_IDS[PRESENTATION_REQUEST],
+                )
             ],
         )
         presentation_request_message._thread = {
@@ -149,8 +152,7 @@ class PresentationManager:
         presentation_exchange_record.state = V10PresentationExchange.STATE_REQUEST_SENT
         presentation_exchange_record.presentation_request = indy_proof_request
         await presentation_exchange_record.save(
-            self.context,
-            reason="create (bound) presentation request"
+            self.context, reason="create (bound) presentation request"
         )
 
         return presentation_exchange_record, presentation_request_message
@@ -174,12 +176,12 @@ class PresentationManager:
             connection_id=connection_id,
             thread_id=presentation_request_message._thread_id,
             initiator=V10PresentationExchange.INITIATOR_SELF,
+            role=V10PresentationExchange.ROLE_VERIFIER,
             state=V10PresentationExchange.STATE_REQUEST_SENT,
             presentation_request=presentation_request_message.indy_proof_request(),
         )
         await presentation_exchange_record.save(
-            self.context,
-            reason="create (free) presentation request"
+            self.context, reason="create (free) presentation request"
         )
 
         return presentation_exchange_record
@@ -300,7 +302,11 @@ class PresentationManager:
 
         presentation_message = Presentation(
             comment=comment,
-            presentations_attach=[AttachDecorator.from_indy_dict(indy_proof)],
+            presentations_attach=[
+                AttachDecorator.from_indy_dict(
+                    indy_dict=indy_proof, ident=ATTACH_DECO_IDS[PRESENTATION]
+                )
+            ],
         )
 
         presentation_message._thread = {"thid": presentation_exchange_record.thread_id}
@@ -330,10 +336,8 @@ class PresentationManager:
             presentation_exchange_record
         ) = await V10PresentationExchange.retrieve_by_tag_filter(
             self.context,
-            tag_filter={
-                "thread_id": thread_id,
-                "connection_id": self.context.connection_record.connection_id
-            },
+            {"thread_id": thread_id},
+            {"connection_id": self.context.connection_record.connection_id},
         )
 
         presentation_exchange_record.presentation = presentation
@@ -342,8 +346,7 @@ class PresentationManager:
         )
 
         await presentation_exchange_record.save(
-            self.context,
-            reason="receive presentation"
+            self.context, reason="receive presentation"
         )
 
         return presentation_exchange_record
@@ -400,8 +403,7 @@ class PresentationManager:
         presentation_exchange_record.state = V10PresentationExchange.STATE_VERIFIED
 
         await presentation_exchange_record.save(
-            self.context,
-            reason="verify presentation"
+            self.context, reason="verify presentation"
         )
 
         return presentation_exchange_record
