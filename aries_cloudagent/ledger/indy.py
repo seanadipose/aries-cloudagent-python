@@ -5,9 +5,11 @@ import json
 import logging
 import re
 import tempfile
+
 from hashlib import sha256
 from os import path
 from datetime import datetime, date
+from time import time
 from typing import Sequence, Type
 
 import indy.anoncreds
@@ -16,6 +18,8 @@ import indy.pool
 from indy.error import IndyError, ErrorCode
 
 from ..cache.base import BaseCache
+from ..messaging.credential_definitions.util import CRED_DEF_SENT_RECORD_TYPE
+from ..messaging.schemas.util import SCHEMA_SENT_RECORD_TYPE
 from ..storage.base import StorageRecord
 from ..storage.indy import IndyStorage
 from ..wallet.base import BaseWallet
@@ -28,6 +32,7 @@ from .error import (
     LedgerError,
     LedgerTransactionError,
 )
+from .util import TAA_ACCEPTED_RECORD_TYPE
 
 
 GENESIS_TRANSACTION_PATH = tempfile.gettempdir()
@@ -75,8 +80,6 @@ class IndyLedger(BaseLedger):
     """Indy ledger class."""
 
     LEDGER_TYPE = "indy"
-
-    TAA_ACCEPTED_RECORD_TYPE = "taa_accepted"
 
     def __init__(
         self,
@@ -344,6 +347,18 @@ class IndyLedger(BaseLedger):
                 else:
                     raise
 
+        schema_id_parts = schema_id.split(":")
+        schema_tags = {
+            "schema_id": schema_id,
+            "schema_issuer_did": public_info.did,
+            "schema_name": schema_id_parts[-2],
+            "schema_version": schema_id_parts[-1],
+            "epoch": str(int(time())),
+        }
+        record = StorageRecord(SCHEMA_SENT_RECORD_TYPE, schema_id, schema_tags,)
+        storage = self.get_indy_storage()
+        await storage.add_record(record)
+
         return schema_id
 
     async def check_existing_schema(
@@ -422,7 +437,7 @@ class IndyLedger(BaseLedger):
             await self.cache.set(
                 [f"schema::{schema_id}", f"schema::{response['result']['seqNo']}"],
                 parsed_response,
-                self.cache_duration
+                self.cache_duration,
             )
 
         return parsed_response
@@ -532,6 +547,22 @@ class IndyLedger(BaseLedger):
                 credential_definition_id,
             )
 
+        schema_id_parts = schema_id.split(":")
+        cred_def_tags = {
+            "schema_id": schema_id,
+            "schema_issuer_did": schema_id_parts[0],
+            "schema_name": schema_id_parts[-2],
+            "schema_version": schema_id_parts[-1],
+            "issuer_did": public_info.did,
+            "cred_def_id": credential_definition_id,
+            "epoch": str(int(time())),
+        }
+        record = StorageRecord(
+            CRED_DEF_SENT_RECORD_TYPE, credential_definition_id, cred_def_tags,
+        )
+        storage = self.get_indy_storage()
+        await storage.add_record(record)
+
         return credential_definition_id
 
     async def get_credential_definition(self, credential_definition_id: str):
@@ -618,9 +649,7 @@ class IndyLedger(BaseLedger):
         public_info = await self.wallet.get_public_did()
         public_did = public_info.did if public_info else None
         with IndyErrorHandler("Exception when building nym request"):
-            request_json = await indy.ledger.build_get_nym_request(
-                public_did, nym
-            )
+            request_json = await indy.ledger.build_get_nym_request(public_did, nym)
         response_json = await self._submit(request_json, public_did=public_did)
         data_json = (json.loads(response_json))["result"]["data"]
         return json.loads(data_json)["verkey"]
@@ -681,9 +710,7 @@ class IndyLedger(BaseLedger):
         """
         public_info = await self.wallet.get_public_did()
         public_did = public_info.did if public_info else None
-        r = await indy.ledger.build_nym_request(
-            public_did, did, verkey, alias, role
-        )
+        r = await indy.ledger.build_nym_request(public_did, did, verkey, alias, role)
         await self._submit(r, True, True, public_did=public_did)
 
     def nym_to_did(self, nym: str) -> str:
@@ -715,10 +742,11 @@ class IndyLedger(BaseLedger):
         )
         response_json = await self._submit(get_taa_req, public_did=public_did)
         taa_found = (json.loads(response_json))["result"]["data"]
-        taa_required = taa_found and taa_found["text"]
+        taa_required = bool(taa_found and taa_found["text"])
         if taa_found:
-            taa_plaintext = taa_found["version"] + taa_found["text"]
-            taa_found["digest"] = sha256(taa_plaintext.encode("utf-8")).digest().hex()
+            taa_found["digest"] = self.taa_digest(
+                taa_found["version"], taa_found["text"]
+            )
 
         return {
             "aml_record": aml_found,
@@ -737,12 +765,15 @@ class IndyLedger(BaseLedger):
         """
         return int(datetime.combine(date.today(), datetime.min.time()).timestamp())
 
+    def taa_digest(self, version: str, text: str):
+        """Generate the digest of a TAA record."""
+        if not version or not text:
+            raise ValueError("Bad input for TAA digest")
+        taa_plaintext = version + text
+        return sha256(taa_plaintext.encode("utf-8")).digest().hex()
+
     async def accept_txn_author_agreement(
-        self,
-        taa_record: dict,
-        mechanism: str,
-        accept_time: int = None,
-        store: bool = False,
+        self, taa_record: dict, mechanism: str, accept_time: int = None
     ):
         """Save a new record recording the acceptance of the TAA."""
         if not accept_time:
@@ -755,24 +786,24 @@ class IndyLedger(BaseLedger):
             "time": accept_time,
         }
         record = StorageRecord(
-            self.TAA_ACCEPTED_RECORD_TYPE,
+            TAA_ACCEPTED_RECORD_TYPE,
             json.dumps(acceptance),
             {"pool_name": self.pool_name},
         )
         storage = self.get_indy_storage()
         await storage.add_record(record)
-        cache_key = self.TAA_ACCEPTED_RECORD_TYPE + "::" + self.pool_name
+        cache_key = TAA_ACCEPTED_RECORD_TYPE + "::" + self.pool_name
         await self.cache.set(cache_key, acceptance, self.cache_duration)
 
     async def get_latest_txn_author_acceptance(self):
         """Look up the latest TAA acceptance."""
-        cache_key = self.TAA_ACCEPTED_RECORD_TYPE + "::" + self.pool_name
+        cache_key = TAA_ACCEPTED_RECORD_TYPE + "::" + self.pool_name
         acceptance = await self.cache.get(cache_key)
         if acceptance is None:
             storage = self.get_indy_storage()
             tag_filter = {"pool_name": self.pool_name}
             found = await storage.search_records(
-                self.TAA_ACCEPTED_RECORD_TYPE, tag_filter
+                TAA_ACCEPTED_RECORD_TYPE, tag_filter
             ).fetch_all()
             if found:
                 records = list(json.loads(record.value) for record in found)
